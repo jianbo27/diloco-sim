@@ -74,10 +74,7 @@ if __name__ == "__main__":
         loss_fn=F.cross_entropy,
         num_nodes=4,
         diloco_interval=500,
-        num_epochs=20,
         batch_size=16,
-        eval_iters=100,
-        save_dir="outputs",
     )
 
     wm.train()

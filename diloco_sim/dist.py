@@ -6,13 +6,6 @@ from tqdm import tqdm
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 from typing import Optional, Callable, Type
-from diloco_sim.util import (
-    parameter_correlation,
-    mean_squared_difference,
-    cosine_similarity,
-    euclidean_distance,
-    time_function,
-)
 import numpy as np
 import torch.multiprocessing as mp
 from torch.distributed import init_process_group as init_process_group, destroy_process_group
@@ -22,7 +15,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class TrainLoss:
+class TrainStats:
     loss: float
     local_step: int
     global_step: int
@@ -31,7 +24,7 @@ class TrainLoss:
 
 
 @dataclass
-class EvalLoss:
+class EvalStats:
     loss: float
     accuracy: float
     local_step: int
@@ -46,24 +39,24 @@ class DilocoSimulator:
         self,
         model_cls: Type[torch.nn.Module],
         model_kwargs: dict,
+        num_nodes: int,
+        optimizer_kwargs: dict,
+        diloco_interval: int,
+        batch_size: int,
         loss_fn: Callable[..., torch.Tensor],
         train_dataset: torch.utils.data.Dataset,
         eval_dataset: Optional[torch.utils.data.Dataset] = None,
         optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.AdamW,
-        optimizer_kwargs: dict = {"lr": 0.001},
-        num_nodes: int = 4,
-        diloco_interval: int = 100,
         ckpt_interval: Optional[int] = None,  # num of outersteps to save model
         eval_iters: int = 50,
-        batch_size: int = 16,
         save_dir: Optional[str] = None,
         outer_optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.SGD,
         outer_optimizer_kwargs: dict = {"lr": 0.7, "nesterov": True, "momentum": 0.9},
         max_local_step: Optional[int] = None,
         num_epochs: int = 1,
         cosine_anneal: bool = False,
-        train_loss_hook: Optional[Callable[[TrainLoss], None]] = None,
-        eval_loss_hook: Optional[Callable[[EvalLoss], None]] = None,
+        train_loss_hook: Optional[Callable[[TrainStats], None]] = None,
+        eval_loss_hook: Optional[Callable[[EvalStats], None]] = None,
         device: Optional[torch.device | str] = None,
     ) -> None:
         super().__init__()
@@ -206,7 +199,7 @@ class DilocoSimulator:
 
         if self.eval_loss_hook:
             self.eval_loss_hook(
-                EvalLoss(
+                EvalStats(
                     loss=avg_master_loss,
                     accuracy=accuracy,
                     local_step=self.local_step,
@@ -281,7 +274,7 @@ class DilocoSimulator:
 
             if self.rank == 0 and self.train_loss_hook:
                 self.train_loss_hook(
-                    TrainLoss(
+                    TrainStats(
                         loss=loss,
                         local_step=self.local_step,
                         global_step=self.local_step * self.num_nodes,
