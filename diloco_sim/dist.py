@@ -38,13 +38,13 @@ class DilocoSimulator:
     def __init__(
         self,
         model_cls: Type[torch.nn.Module],
-        model_kwargs: dict,
-        num_nodes: int,
-        optimizer_kwargs: dict,
-        diloco_interval: int,
-        batch_size: int,
         loss_fn: Callable[..., torch.Tensor],
         train_dataset: torch.utils.data.Dataset,
+        model_kwargs: dict = {},
+        num_nodes: int = 4,
+        optimizer_kwargs: dict = {"lr": 0.001},
+        diloco_interval: int = 500,
+        batch_size: int = 16,
         eval_dataset: Optional[torch.utils.data.Dataset] = None,
         optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.AdamW,
         ckpt_interval: Optional[int] = None,  # num of outersteps to save model
