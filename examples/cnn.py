@@ -73,8 +73,10 @@ if __name__ == "__main__":
         eval_dataset=test_dataset,
         loss_fn=F.cross_entropy,
         num_nodes=4,
-        diloco_interval=500,
-        batch_size=16,
+        diloco_interval=100,
+        batch_size=32,
+        num_epochs=1,
+        save_dir="outputs",
     )
 
-    wm.train()
+    wm.train("outputs/model_iter_390.pth")

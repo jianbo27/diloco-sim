@@ -57,7 +57,6 @@ class DilocoSimulator:
         cosine_anneal: bool = False,
         train_loss_hook: Optional[Callable[[TrainStats], None]] = None,
         eval_loss_hook: Optional[Callable[[EvalStats], None]] = None,
-        device: Optional[torch.device | str] = None,
     ) -> None:
         super().__init__()
         self.model_cls = model_cls
@@ -85,24 +84,6 @@ class DilocoSimulator:
         self.train_loss_hook = train_loss_hook
         self.eval_loss_hook = eval_loss_hook
 
-        # Initialize Master Model
-
-        self.model = self.model_cls(**self.model_kwargs)
-        for param in self.model.parameters():
-            param.requires_grad = True
-
-        # self.optimizer = None
-
-        # self.train_dataloader: DataLoader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
-        # self.train_data_iter = iter(self.train_dataloader)
-
-        # if self.eval_dataset:
-        #     self.eval_dataloader: DataLoader = DataLoader(self.eval_dataset, batch_size=self.batch_size, shuffle=True)
-        #     self.eval_data_iter = iter(self.eval_dataloader)
-
-        # self.losses: list[float] = []
-        # self.grad_norms: list[float] = []
-
     def _initialize_distributed(self, rank: int, model_path: Optional[str] = None):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "12355"
@@ -117,15 +98,17 @@ class DilocoSimulator:
         torch.cuda.set_device(self.device) if self.device.type == "cuda" else None
 
         self.model = self.model_cls(**self.model_kwargs).to(self.device)
-        if model_path:
+        if self.rank == 0 and model_path:
             self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         for name, param in self.model.named_parameters():
             dist.broadcast(param.data, src=0)
         self.optimizer = self.optimizer_cls(self.model.parameters(), **self.optimizer_kwargs)
+        if self.cosine_anneal:
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.max_local_step)
 
         if rank == 0:
-            self.master_model = deepcopy(self.model)
-            self.master_model.to(self.device)
+            self.master_model = deepcopy(self.model).to("cpu")
+            # Master model lives on CPU because only used for storage + outer opt (no matrix multiplies)
             for param in self.master_model.parameters():
                 param.requires_grad = True
             self.master_optimizer = self.outer_optimizer_cls(
@@ -153,7 +136,8 @@ class DilocoSimulator:
     def _save_model(self):
         name = f"iter_{self.local_step}"
         os.makedirs(self.save_dir, exist_ok=True)
-        torch.save(self.master_model.state_dict(), f"{self.save_dir}/model_{name}.pth")
+        torch.save(self.model.state_dict(), f"{self.save_dir}/model_{name}.pth")
+        # TODO: better checkpointing (save local variables)
 
     def _outer_step(self):
 
@@ -164,43 +148,43 @@ class DilocoSimulator:
         if self.rank == 0:
             self.master_optimizer.zero_grad()
 
-            for name, param in self.master_model.named_parameters():
-                param.grad = param.data - self.model.state_dict()[name].data
+            for name, param in self.model.named_parameters():
+                param.grad = self.master_model.state_dict()[name].data - param.data
 
             self.master_optimizer.step()
 
             for name, param in self.master_model.named_parameters():
-                param.data = self.model.state_dict()[name].data
+                param.data = self.model.state_dict()[name].data.to("cpu")
 
         for name, param in self.model.named_parameters():
             dist.broadcast(param.data, src=0)
 
     def _eval_model(self):
 
-        self.master_model.eval()
+        self.model.eval()
 
         correct = 0
-        master_losses = []
+        losses = []
         with torch.no_grad():
             for i in range(self.eval_iters):
                 x, y = self.get_batch(eval=True)
 
-                master_output = self.master_model(x)
-                master_loss = self.loss_fn(master_output, y)
-                master_losses.append(master_loss.item())
-                correct += (master_output.argmax(dim=1) == y).sum().item()
+                output = self.model(x)
+                loss = self.loss_fn(output, y)
+                losses.append(loss.item())
+                correct += (output.argmax(dim=1) == y).sum().item()
 
-        avg_master_loss = sum(master_losses) / len(master_losses)
-        master_loss_std = np.std(master_losses)
+        avg_loss = sum(losses) / len(losses)
+        loss_std = np.std(losses)
         accuracy = correct / (self.eval_iters * self.batch_size)
 
-        print(f"Avg Loss: {avg_master_loss:.4f}")
+        print(f"Avg Loss: {avg_loss:.4f}")
         print(f"Accuracy: {accuracy:.4f}")
 
         if self.eval_loss_hook:
             self.eval_loss_hook(
                 EvalStats(
-                    loss=avg_master_loss,
+                    loss=avg_loss,
                     accuracy=accuracy,
                     local_step=self.local_step,
                     global_step=self.local_step * self.num_nodes,
@@ -236,8 +220,8 @@ class DilocoSimulator:
         loss = self.loss_fn(output, y)
         loss.backward()
         self.optimizer.step()
-        # if self.cosine_anneal:
-        #     scheduler.step()
+        if self.cosine_anneal:
+            self.scheduler.step()
 
         return loss.item()
 
@@ -252,36 +236,35 @@ class DilocoSimulator:
 
             loss = self._train_step()
 
+            if self.diloco_interval and self.local_step % self.diloco_interval == 0:
+                self._outer_step()
+                if self.rank == 0 and self.eval_dataset:
+                    self._eval_model()
+                dist.barrier()
+
             if self.rank == 0:
 
                 pbar.update(1)
                 pbar.set_postfix({"Loss": f"{loss:.4f}", "Epoch": self.epoch})
 
-            if self.diloco_interval and self.local_step % self.diloco_interval == 0:
-                dist.barrier()
-                self._outer_step()
-                if self.rank == 0:
-                    self._eval_model()
-
                 if (
-                    self.rank == 0
-                    and self.ckpt_interval
+                    self.ckpt_interval
                     and self.save_dir
                     and self.local_step % (self.diloco_interval * self.ckpt_interval) == 0
                     and self.local_step > 0
                 ):
                     self._save_model()
 
-            if self.rank == 0 and self.train_loss_hook:
-                self.train_loss_hook(
-                    TrainStats(
-                        loss=loss,
-                        local_step=self.local_step,
-                        global_step=self.local_step * self.num_nodes,
-                        epoch=self.epoch,
-                        num_diloco_steps=self.local_step // self.diloco_interval,
+                if self.train_loss_hook:
+                    self.train_loss_hook(
+                        TrainStats(
+                            loss=loss,
+                            local_step=self.local_step,
+                            global_step=self.local_step * self.num_nodes,
+                            epoch=self.epoch,
+                            num_diloco_steps=self.local_step // self.diloco_interval,
+                        )
                     )
-                )
 
             self.local_step += 1
 
