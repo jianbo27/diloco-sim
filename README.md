@@ -17,13 +17,9 @@ from data import train_dataset, test_dataset
 
 simulator = DilocoSimulator(
     model_cls=CNNModel,
-    model_kwargs={"num_classes": 100, ...},
-    optimizer_kwargs={"lr": 0.001},
+    model_kwargs={"num_classes": 100},
     train_dataset=train_dataset,
     loss_fn=F.cross_entropy,
-    num_nodes=4,
-    diloco_interval=500,
-    batch_size=16,
 )
 
 simulator.train()
@@ -34,8 +30,8 @@ The full list of available arguments is shown below:
 
 | **Argument**         | **Type**                | **Default**                  | **Description**                                                                 |
 |-----------------------|-------------------------|------------------------------|---------------------------------------------------------------------------------|
-| `model_cls`          | `Type[torch.nn.Module]` | **Required**                | The model class to be instantiated and trained. Must be a subclass of `nn.Module`. |
-| `loss_fn`            | `Callable[..., torch.Tensor]` | **Required**                | The loss function used during training. Example: `torch.nn.functional.cross_entropy`. Must be of form (x,y) => loss |
+| `model_cls`          | `Type[Module]` | **Required**                | The model class to be instantiated and trained. Must be a subclass of `torch.nn.Module`. |
+| `loss_fn`            | `(x,y) -> loss` | **Required**                | The loss function used during training. Example: `torch.nn.functional.cross_entropy`. Must be of form (x,y) => loss |
 | `train_dataset`      | `Dataset` | **Required**                | The dataset for training. Should be a subclass of `torch.utils.data.Dataset`.                   |
 | `model_kwargs`       | `dict`                 | `{}`                        | Keyword arguments to initialize the model. Example: `{"num_classes": 100, ...}`.     |
 | `num_nodes`          | `int`                  | `4`                         | Number of nodes (simulated workers) in the distributed system.                  |
@@ -52,5 +48,5 @@ The full list of available arguments is shown below:
 | `max_local_step`     | `Optional[int]`        | `None`                      | Maximum number of local steps to train. Default is `None`. If specified, training will stop after this many local steps if it occurs before the end of `num_epochs` epochs. |
 | `num_epochs`         | `int`                  | `1`                        | Total number of training epochs.                                                |
 | `cosine_anneal`      | `bool`                 | `False`                     | Whether to use cosine annealing for learning rate scheduling. Default is `False`. |
-| `train_loss_hook`    | `Optional[Callable[[TrainStats], None]]` | `None`                      | Function to call after each local step. Default is `None`. `TrainStats` is a dataclass defined below.                   |
-| `eval_loss_hook`     | `Optional[Callable[[EvalStats], None]]` | `None`                      | Function to call after each evaluation. Default is `None`. `EvalStats` is a dataclass defined below.                    |
+| `train_loss_hook`    | `(TrainStats) -> None` | `None`                      | Function to call after each local step. Default is `None`. `TrainStats` is a dataclass defined below.                   |
+| `eval_loss_hook`     | `(EvalStats) -> None` | `None`                      | Function to call after each evaluation. Default is `None`. `EvalStats` is a dataclass defined below.                    |
