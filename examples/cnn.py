@@ -4,6 +4,7 @@ import torchvision.transforms as transforms
 from torchvision.datasets import MNIST, CIFAR100
 import torch.nn.functional as F
 import torch.nn as nn
+from torchvision import models
 
 
 class CNNModel(nn.Module):
@@ -39,6 +40,19 @@ class CNNModel(nn.Module):
         return x
 
 
+class ResNetForCIFAR100(nn.Module):
+    def __init__(self, num_classes=100, pretrained=False):
+        super(ResNetForCIFAR100, self).__init__()
+        # Load the ResNet-18 model
+        self.resnet = models.resnet18(pretrained=pretrained)
+
+        # Replace the final fully connected layer
+        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
+
+    def forward(self, x):
+        return self.resnet(x)
+
+
 if __name__ == "__main__":
 
     torch.manual_seed(12345)
@@ -53,30 +67,17 @@ if __name__ == "__main__":
 
     wm = DilocoSimulator(
         model_cls=CNNModel,
-        model_kwargs={
-            "input_channels": 3,
-            "input_height": 32,
-            "input_width": 32,
-            "num_classes": 100,
-        },
+        model_kwargs={"input_channels": 3, "input_height": 32, "input_width": 32, "num_classes": 100},
         optimizer_kwargs={"lr": 0.001},
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         loss_fn=F.cross_entropy,
-        num_workers=1,
-        diloco_interval=100,
+        num_nodes=4,
+        diloco_interval=500,
         num_epochs=20,
         batch_size=16,
+        eval_iters=100,
         save_dir="outputs",
-        # num_workers=4,
-        # diloco_interval=1,
-        # eval_interval=1,
-        # eval_iters=50,
-        # batch_size=16,
-        # save_dir="outputs",
-        # wandb_project="diloco-sim",
     )
-
-    # wm.load_model("outputs/cnn_model.pth")
 
     wm.train()

@@ -1,9 +1,8 @@
 import torch
 from copy import deepcopy
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 import os
 from tqdm import tqdm
-import wandb
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 from typing import Optional, Callable, Type
@@ -15,6 +14,30 @@ from diloco_sim.util import (
     time_function,
 )
 import numpy as np
+import torch.multiprocessing as mp
+from torch.distributed import init_process_group as init_process_group, destroy_process_group
+import torch.distributed as dist
+import signal
+from dataclasses import dataclass
+
+
+@dataclass
+class TrainLoss:
+    loss: float
+    local_step: int
+    global_step: int
+    epoch: int
+    num_diloco_steps: int
+
+
+@dataclass
+class EvalLoss:
+    loss: float
+    accuracy: float
+    local_step: int
+    global_step: int
+    epoch: int
+    num_diloco_steps: int
 
 
 class DilocoSimulator:
@@ -28,20 +51,19 @@ class DilocoSimulator:
         eval_dataset: Optional[torch.utils.data.Dataset] = None,
         optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.AdamW,
         optimizer_kwargs: dict = {"lr": 0.001},
-        num_workers: int = 4,
+        num_nodes: int = 4,
         diloco_interval: int = 100,
         ckpt_interval: Optional[int] = None,  # num of outersteps to save model
         eval_iters: int = 50,
         batch_size: int = 16,
         save_dir: Optional[str] = None,
-        wandb_project: Optional[str] = None,  # WandB project name, pass None to disable logging
-        wandb_config: Optional[dict] = None,
         outer_optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.SGD,
         outer_optimizer_kwargs: dict = {"lr": 0.7, "nesterov": True, "momentum": 0.9},
         max_local_step: Optional[int] = None,
         num_epochs: int = 1,
         cosine_anneal: bool = False,
-        log_stats_interval: int = 10,
+        train_loss_hook: Optional[Callable[[TrainLoss], None]] = None,
+        eval_loss_hook: Optional[Callable[[EvalLoss], None]] = None,
         device: Optional[torch.device | str] = None,
     ) -> None:
         super().__init__()
@@ -54,139 +76,115 @@ class DilocoSimulator:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.loss_fn = loss_fn
-        self.num_workers = num_workers
+        self.num_nodes = num_nodes
         self.diloco_interval = diloco_interval
         self.ckpt_interval = ckpt_interval
         self.eval_iters = eval_iters
         self.batch_size = batch_size
         self.save_dir = save_dir
-        self.wandb_project = wandb_project
-        self.wandb_config = wandb_config
         self.local_step: int = 0
         self.epoch: int = 0
-        self.max_local_step = num_epochs * len(train_dataset) // (batch_size * num_workers)
+        self.max_local_step = num_epochs * len(train_dataset) // (batch_size * num_nodes)
         if max_local_step:
             self.max_local_step = min(self.max_local_step, max_local_step)
         self.num_epochs = num_epochs
         self.cosine_anneal = cosine_anneal
-        self.log_stats_interval = log_stats_interval
-
-        self.device: torch.device | str = (
-            torch.device("cuda" if torch.cuda.is_available() else "cpu") if not device else device
-        )
+        self.train_loss_hook = train_loss_hook
+        self.eval_loss_hook = eval_loss_hook
 
         # Initialize Master Model
 
-        self.master_model = self.model_cls(**self.model_kwargs).to(self.device)
-        for param in self.master_model.parameters():
+        self.model = self.model_cls(**self.model_kwargs)
+        for param in self.model.parameters():
             param.requires_grad = True
 
-        self.master_optimizer = self.outer_optimizer_cls(self.master_model.parameters(), **self.outer_optimizer_kwargs)
+        # self.optimizer = None
 
-        self.train_dataloader: DataLoader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        # self.train_dataloader: DataLoader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        # self.train_data_iter = iter(self.train_dataloader)
+
+        # if self.eval_dataset:
+        #     self.eval_dataloader: DataLoader = DataLoader(self.eval_dataset, batch_size=self.batch_size, shuffle=True)
+        #     self.eval_data_iter = iter(self.eval_dataloader)
+
+        # self.losses: list[float] = []
+        # self.grad_norms: list[float] = []
+
+    def _initialize_distributed(self, rank: int, model_path: Optional[str] = None):
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = "12355"
+        self.rank = rank
+        init_process_group(
+            backend="nccl" if torch.cuda.is_available() else "gloo",
+            # init_method="env://",
+            rank=rank,
+            world_size=self.num_nodes,
+        )
+        self.device = torch.device(f"cuda:{rank % torch.cuda.device_count()}" if torch.cuda.is_available() else "cpu")
+        torch.cuda.set_device(self.device) if self.device.type == "cuda" else None
+
+        self.model = self.model_cls(**self.model_kwargs).to(self.device)
+        if model_path:
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        for name, param in self.model.named_parameters():
+            dist.broadcast(param.data, src=0)
+        self.optimizer = self.optimizer_cls(self.model.parameters(), **self.optimizer_kwargs)
+
+        if rank == 0:
+            self.master_model = deepcopy(self.model)
+            self.master_model.to(self.device)
+            for param in self.master_model.parameters():
+                param.requires_grad = True
+            self.master_optimizer = self.outer_optimizer_cls(
+                self.master_model.parameters(), **self.outer_optimizer_kwargs
+            )
+
+        sampler = DistributedSampler(
+            self.train_dataset, num_replicas=self.num_nodes, rank=rank, shuffle=True, drop_last=True
+        )  # May want to do different data split between workers when looping over epochs
+        self.train_dataloader: DataLoader = DataLoader(
+            self.train_dataset, batch_size=self.batch_size, sampler=sampler, pin_memory=True
+        )
         self.train_data_iter = iter(self.train_dataloader)
 
-        if self.eval_dataset:
-            self.eval_dataloader: DataLoader = DataLoader(self.eval_dataset, batch_size=self.batch_size, shuffle=True)
+        if self.eval_dataset and rank == 0:
+            self.eval_dataloader: DataLoader = DataLoader(
+                self.eval_dataset, batch_size=self.batch_size, pin_memory=True, shuffle=True
+            )
             self.eval_data_iter = iter(self.eval_dataloader)
 
-        # Initialize Local Models
-
-        self.models = [deepcopy(self.master_model).to(self.device) for _ in range(self.num_workers)]
-        self.optimizers = [
-            self.optimizer_cls(self.models[i].parameters(), **self.optimizer_kwargs) for i in range(self.num_workers)
-        ]
-        self.schedulers = [
-            CosineAnnealingLR(self.optimizers[i], T_max=self.max_local_step) if self.cosine_anneal else None
-            for i in range(self.num_workers)
-        ]
-
-        self.losses: list[float] = []
-        self.grad_norms: list[float] = []
-
-        wandb_config = {
-            "batch_size": self.batch_size,
-            "inner_optimizer_kwargs": self.optimizer_kwargs,
-            "outer_optimizer_kwargs": self.outer_optimizer_kwargs,
-            "num_workers": self.num_workers,
-            "diloco_interval": self.diloco_interval,
-            "cosine_anneal": self.cosine_anneal,
-            "max_local_step": self.max_local_step,
-            "eval_iters": self.eval_iters,
-            "save_dir": self.save_dir,
-            "model_kwargs": self.model_kwargs,
-        }
-
-        if self.wandb_project:
-            wandb.init(project=self.wandb_project, config=self.wandb_config)
-            wandb.config.update(wandb_config)
+    def _cleanup(self):
+        if dist.is_initialized():
+            destroy_process_group()
 
     def _save_model(self):
-        if not self.save_dir:
-            return
-
         name = f"iter_{self.local_step}"
-        self._load_master_model()
         os.makedirs(self.save_dir, exist_ok=True)
-        torch.save(self.master_model.state_dict(), f"{self.save_dir}/avg_{name}.pth")
-        for i, model in enumerate(self.models):
-            torch.save(model.state_dict(), f"{self.save_dir}/model_{i}_{name}.pth")
+        torch.save(self.master_model.state_dict(), f"{self.save_dir}/model_{name}.pth")
 
     def _outer_step(self):
 
-        self.master_optimizer.zero_grad()
+        for param in self.model.parameters():
+            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)  # Sum all parameters
+            param.data /= self.num_nodes
 
-        delta = {name: torch.zeros_like(param.data) for name, param in self.master_model.named_parameters()}
-        for local_model in self.models:
-            for name, param in local_model.named_parameters():
-                delta[name] += param.data - self.master_model.state_dict()[name].data
+        if self.rank == 0:
+            self.master_optimizer.zero_grad()
 
-        for name, param in self.master_model.named_parameters():
-            delta[name] /= self.num_workers
-            param.grad = -delta[name]
+            for name, param in self.master_model.named_parameters():
+                param.grad = param.data - self.model.state_dict()[name].data
 
-        self.master_optimizer.step()
+            self.master_optimizer.step()
 
-        for model in self.models:
-            model.load_state_dict(self.master_model.state_dict())
+            for name, param in self.master_model.named_parameters():
+                param.data = self.model.state_dict()[name].data
 
-    def _log_stats(self):
-        if not self.wandb_project:
-            return
-
-        # cum_grad_norm_var = np.var(self.grad_norms)
-        # sliding_grad_norm_var = np.var(self.grad_norms[-100:])
-        # cum_loss_var = np.var(self.losses)
-        # sliding_loss_var = np.var(self.losses[-100:])
-        # param_correlation = parameter_correlation(self.models)
-        # euclidean_dist = euclidean_distance(self.models)
-        # print(f"Parameter Correlation: {param_correlation:.4f}")
-        # print(f"Euclidean Distance: {euclidean_dist:.4f}")
-
-        wandb.log(
-            {
-                "global_step": self.local_step * self.num_workers,
-                "local_step": self.local_step,
-                "lr": self.optimizers[0].param_groups[0]["lr"],
-                "train_loss": random.choice(self.losses[-self.num_workers :]),
-                "grad_norm": random.choice(self.grad_norms[-self.num_workers :]),
-                # "cum_grad_norm_var": cum_grad_norm_var,
-                # "sliding_grad_norm_var": sliding_grad_norm_var,
-                # "cum_loss_var": cum_loss_var,
-                # "sliding_loss_var": sliding_loss_var,
-                # "p_shuffle": self.p_shuffle,
-                # "param_correlation": param_correlation,
-                # "euclidean_dist": euclidean_dist,
-            }
-        )
+        for name, param in self.model.named_parameters():
+            dist.broadcast(param.data, src=0)
 
     def _eval_model(self):
-        if not self.eval_dataset:
-            return
 
         self.master_model.eval()
-        for model in self.models:
-            model.eval()
 
         correct = 0
         master_losses = []
@@ -206,20 +204,17 @@ class DilocoSimulator:
         print(f"Avg Loss: {avg_master_loss:.4f}")
         print(f"Accuracy: {accuracy:.4f}")
 
-        if self.wandb_project:
-            wandb.log(
-                {
-                    "global_step": self.local_step * self.num_workers,
-                    "local_step": self.local_step,
-                    "eval_accuracy": accuracy,
-                    "outer_steps": self.local_step // self.diloco_interval,
-                    "eval_loss": avg_master_loss,
-                    # "eval_loss_std": master_loss_std,
-                }
+        if self.eval_loss_hook:
+            self.eval_loss_hook(
+                EvalLoss(
+                    loss=avg_master_loss,
+                    accuracy=accuracy,
+                    local_step=self.local_step,
+                    global_step=self.local_step * self.num_nodes,
+                    epoch=self.epoch,
+                    num_diloco_steps=self.local_step // self.diloco_interval,
+                )
             )
-
-        for model in self.models:
-            model.train()
 
     def get_batch(self, eval=False):
         if not eval:
@@ -242,63 +237,75 @@ class DilocoSimulator:
 
     def _train_step(self):
 
-        for model, optimizer, scheduler in zip(self.models, self.optimizers, self.schedulers):
-            x, y = self.get_batch()
-            optimizer.zero_grad()
-            output = model(x)
-            loss = self.loss_fn(output, y)
-            loss.backward()
-            optimizer.step()
-            if self.cosine_anneal:
-                scheduler.step()
+        x, y = self.get_batch()
+        self.optimizer.zero_grad()
+        output = self.model(x)
+        loss = self.loss_fn(output, y)
+        loss.backward()
+        self.optimizer.step()
+        # if self.cosine_anneal:
+        #     scheduler.step()
 
-            self.losses.append(loss.item())
-            self.grad_norms.append(
-                torch.norm(torch.cat([p.grad.view(-1) for p in model.parameters() if p.grad != None])).item()
-            )
+        return loss.item()
 
     def _train_loop(self):
+        if self.rank == 0:
+            print(f"Training for {self.max_local_step} steps")
+            pbar = tqdm(total=self.max_local_step)
 
-        pbar = tqdm(total=self.max_local_step)
+        self.model.train()
 
         while self.local_step < self.max_local_step:
 
-            self._train_step()
+            loss = self._train_step()
 
-            loss = random.choice(self.losses[-self.num_workers :])
+            if self.rank == 0:
 
-            pbar.update(1)
-            pbar.set_postfix({"Loss": f"{loss:.4f}", "Epoch": self.epoch})
+                pbar.update(1)
+                pbar.set_postfix({"Loss": f"{loss:.4f}", "Epoch": self.epoch})
 
             if self.diloco_interval and self.local_step % self.diloco_interval == 0:
+                dist.barrier()
                 self._outer_step()
-                self._eval_model()
+                if self.rank == 0:
+                    self._eval_model()
 
                 if (
-                    self.ckpt_interval
+                    self.rank == 0
+                    and self.ckpt_interval
+                    and self.save_dir
                     and self.local_step % (self.diloco_interval * self.ckpt_interval) == 0
                     and self.local_step > 0
                 ):
                     self._save_model()
 
-            if self.local_step % self.log_stats_interval == 0:
-                self._log_stats()
+            if self.rank == 0 and self.train_loss_hook:
+                self.train_loss_hook(
+                    TrainLoss(
+                        loss=loss,
+                        local_step=self.local_step,
+                        global_step=self.local_step * self.num_nodes,
+                        epoch=self.epoch,
+                        num_diloco_steps=self.local_step // self.diloco_interval,
+                    )
+                )
 
             self.local_step += 1
 
-        pbar.close()
+        if self.rank == 0:
+            print("Training Complete")
+            pbar.close()
+            if self.save_dir:
+                self._save_model()
 
-    def train(self):
-        for model in self.models:
-            model.train()
+    def _train(self, rank: int, model_path: Optional[str] = None):
+        # signal.signal(signal.SIGINT, self._cleanup)
+        # signal.signal(signal.SIGTERM, self._cleanup)
+        try:
+            self._initialize_distributed(rank, model_path)
+            self._train_loop()
+        finally:
+            self._cleanup()
 
-        self._train_loop()
-        self._save_model()
-
-        if self.wandb_project:
-            wandb.finish()
-
-    def load_model(self, path):
-        self.master_model.load_state_dict(torch.load(path))
-        for model in self.models:
-            model.load_state_dict(self.master_model.state_dict())
+    def train(self, model_path: Optional[str] = None):
+        torch.multiprocessing.spawn(self._train, args=(model_path,), nprocs=self.num_nodes, join=True)
