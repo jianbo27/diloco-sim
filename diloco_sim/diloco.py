@@ -232,7 +232,3 @@ class DilocoSimulator:
 
     def train(self):
         torch.multiprocessing.spawn(self._train, args=(), nprocs=self.config.num_nodes, join=True)
-
-
-class TrainingMixin:
-    
