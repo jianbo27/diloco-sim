@@ -1,5 +1,5 @@
 import torch
-from diloco_sim import DilocoSimulator
+from diloco_sim import DilocoSimulator, DilocoSimulatorConfig
 import torchvision.transforms as transforms
 from torchvision.datasets import MNIST, CIFAR100
 import torch.nn.functional as F
@@ -44,10 +44,19 @@ class ResNetForCIFAR100(nn.Module):
     def __init__(self, num_classes=100, pretrained=False):
         super(ResNetForCIFAR100, self).__init__()
         # Load the ResNet-18 model
-        self.resnet = models.resnet18(pretrained=pretrained)
+        self.resnet = models.resnet18(weights=None if not pretrained else "IMAGENET1K_V1")
 
         # Replace the final fully connected layer
-        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+        # self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
+        self.resnet.fc = nn.Sequential(
+            nn.Linear(self.resnet.fc.in_features, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, num_classes),
+        )
 
     def forward(self, x):
         return self.resnet(x)
@@ -65,18 +74,16 @@ if __name__ == "__main__":
     train_dataset = CIFAR100(root="./data", train=True, transform=transform, download=True)
     test_dataset = CIFAR100(root="./data", train=False, transform=transform, download=True)
 
-    wm = DilocoSimulator(
+    config = DilocoSimulatorConfig(
         model_cls=CNNModel,
-        model_kwargs={"input_channels": 3, "input_height": 32, "input_width": 32, "num_classes": 100},
+        model_kwargs={"num_classes": 100, "input_channels": 3, "input_height": 32, "input_width": 32},
         optimizer_kwargs={"lr": 0.001},
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         loss_fn=F.cross_entropy,
-        num_nodes=4,
-        diloco_interval=100,
-        batch_size=32,
-        num_epochs=1,
-        save_dir="outputs",
+        num_epochs=10,
     )
 
-    wm.train("outputs/model_iter_390.pth")
+    wm = DilocoSimulator(config)
+
+    wm.train()

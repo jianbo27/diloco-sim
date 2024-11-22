@@ -1,1 +1,1 @@
-from .dist import DilocoSimulator, TrainStats, EvalStats
+from .diloco import DilocoSimulator, DilocoSimulatorConfig
