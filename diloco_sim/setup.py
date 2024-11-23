@@ -7,9 +7,12 @@ from copy import deepcopy
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from .config import DilocoSimulatorConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-class SetupSimulator:
+class DilocoSetup:
     rank: int
     device: torch.device
     model: torch.nn.Module
@@ -30,6 +33,12 @@ class SetupSimulator:
         self.max_local_step = (
             self.config.num_epochs * len(self.config.train_dataset) // (self.config.batch_size * self.config.num_nodes)
         )
+        if self.config.max_local_step:
+            self.max_local_step = min(self.max_local_step, self.config.max_local_step)
+        self._initialize_logging()
+
+    def _initialize_logging(self) -> None:
+        logger.info("DilocoSimulator initialized with config: %s", self.config)
 
     def _initialize_distributed(self, rank: int):
         os.environ["MASTER_ADDR"] = "127.0.0.1"

@@ -23,3 +23,7 @@ class DilocoSimulatorConfig:
     diloco_interval: int = 500
     outer_optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.SGD
     outer_optimizer_kwargs: dict = field(default_factory=lambda: {"lr": 0.7, "nesterov": True, "momentum": 0.9})
+    max_local_step: Optional[int] = None
+    network_delay: float = 0.0
+    network_bandwidth: float = 10000000000.0
+    flop_per_second_per_node: float = 10000000000.0

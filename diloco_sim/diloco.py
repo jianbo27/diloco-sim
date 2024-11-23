@@ -2,55 +2,51 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 from .config import DilocoSimulatorConfig
-from .setup import SetupSimulator
+from .setup import DilocoSetup
+from .comm import CommunicationSimulator
+from .eval import Evaluator
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
-class DilocoSimulator(SetupSimulator):
+class DilocoSimulator(CommunicationSimulator, Evaluator):
 
     def __init__(self, config: DilocoSimulatorConfig) -> None:
         super().__init__(config)
 
-    def _eval_model(self):
-        self.model.eval()
-
-        correct = 0
-        losses = []
-        with torch.no_grad():
-            for _ in range(self.config.eval_iters):
-                x, y = self._get_batch(eval=True)
-                output = self.model(x)
-                loss = self.config.loss_fn(output, y)
-                losses.append(loss.item())
-                correct += (output.argmax(dim=1) == y).sum().item()
-
-        avg_loss = sum(losses) / len(losses)
-        accuracy = correct / (self.config.eval_iters * self.config.batch_size)
-
-        print(f"Eval Loss: {avg_loss:.4f}")
-        print(f"Eval Accuracy: {accuracy:.4f}")
-
-        self.model.train()
-
-    def _outer_step(self):
+    def _average_models(self) -> None:
         for param in self.model.parameters():
-            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)  # Sum all parameters
+            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
             param.data /= self.config.num_nodes
+
+    def _broadcast_model_params(self) -> None:
+        for param in self.model.parameters():
+            dist.broadcast(param.data, src=0)
+
+    def _set_master_grad(self) -> None:
+        for name, param in self.model.named_parameters():
+            param.grad = self.master_model.state_dict()[name].data.to(param.device) - param.data
+
+    def _synchronize_master_model(self) -> None:
+        for name, param in self.master_model.named_parameters():
+            param.data = self.model.state_dict()[name].data.to("cpu")
+
+    def _outer_step(self) -> None:
+        super()._outer_step()
+        self._average_models()
 
         if self.rank == 0:
             self.master_optimizer.zero_grad()
-
-            for name, param in self.model.named_parameters():
-                param.grad = self.master_model.state_dict()[name].data.to(device=param.device) - param.data
-
+            self._set_master_grad()
             self.master_optimizer.step()
+            self._synchronize_master_model()
 
-            for name, param in self.master_model.named_parameters():
-                param.data = self.model.state_dict()[name].data.to("cpu")
-
-        for name, param in self.model.named_parameters():
-            dist.broadcast(param.data, src=0)
+        self._broadcast_model_params()
 
     def _train_step(self):
+        super()._train_step()
         x, y = self._get_batch()
         self.optimizer.zero_grad()
         output = self.model(x)
@@ -60,6 +56,8 @@ class DilocoSimulator(SetupSimulator):
         if self.scheduler:
             self.scheduler.step()
 
+        return loss.item()
+
     def _train_loop(self):
 
         pbar = tqdm(total=self.max_local_step)
@@ -67,16 +65,22 @@ class DilocoSimulator(SetupSimulator):
 
         while self.local_step < self.max_local_step:
 
-            self._train_step()
+            loss = self._train_step()
 
             if self.local_step % self.config.diloco_interval == 0:
                 self._outer_step()
                 if self.rank == 0 and self.config.eval_dataset:
-                    self._eval_model()
-                dist.barrier()
+                    self._evaluate()
 
             self.local_step += 1
             pbar.update(1)
+            pbar.set_postfix(
+                {
+                    "train_time": self.train_time + self.communication_time,
+                    "loss": f"{loss:.4f}",
+                    "epoch": self.epoch,
+                }
+            )
 
         pbar.close()
 
