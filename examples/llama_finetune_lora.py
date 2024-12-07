@@ -282,6 +282,9 @@ if __name__ == "__main__":
         tokenizer.pad_token = tokenizer.eos_token
     
     train_dataset, eval_dataset = prepare_datasets(tokenizer, max_length=512)
+
+    lora_save_dir = "./llama_alpaca_lora_finetuned"
+    os.makedirs(lora_save_dir, exist_ok=True)
     
     config = DilocoSimulatorConfig(
         model_cls=LoraLlamaAlpacaModel,
@@ -301,7 +304,7 @@ if __name__ == "__main__":
         eval_dataset=eval_dataset,
         batch_size=1,
         num_epochs=3,
-        save_dir="./llama_alpaca_lora_finetuned",
+        save_dir=lora_save_dir,
         eval_iters=50,
         num_nodes=2,
         diloco_interval=500
