@@ -6,6 +6,7 @@ import json
 import os
 from typing import Dict, List
 import torch.nn as nn
+import wandb
 
 def modified_eval_model(trainer):
     trainer.model.eval()
@@ -17,6 +18,7 @@ def modified_eval_model(trainer):
             loss = trainer.config.loss_fn(output, y)
             total_loss += loss.item()
     trainer.model.train()
+    print(f"Eval Loss: {total_loss / trainer.config.eval_iters}")
     return total_loss / trainer.config.eval_iters
 
 # Monkey patch the evaluation method
@@ -141,7 +143,7 @@ def prepare_datasets(tokenizer, max_length: int = 512):
 class LlamaAlpacaConfig:
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-3.1-8B",
+        model_name: str = "meta-llama/Llama-3.2-1B",
         save_dir: str = "./llama_alpaca_finetuned",
         num_epochs: int = 3,
         batch_size: int = 4,
@@ -167,11 +169,71 @@ class LlamaAlpacaConfig:
         self.num_nodes = num_nodes
         self.diloco_interval = diloco_interval
 
+class WandBMonitor(DilocoSimulator):
+    def _setup_master_model(self):
+        if self.rank == 0:
+            self.master_model = self.model.__class__(**self.config.model_kwargs)
+
+    def _eval_model(self):
+        self.model.eval()
+        total_loss = 0
+        
+        with torch.no_grad():
+            for _ in range(self.config.eval_iters):
+                x, y = self._get_batch(eval=True)
+                output = self.model(x)
+                total_loss += output.item()
+                
+                if self.rank == 0:
+                    wandb.log({"eval_loss": output.item()})
+                    
+        avg_loss = total_loss / self.config.eval_iters
+        if self.rank == 0:
+            print(f"Eval Loss: {avg_loss}")
+            
+        self.model.train()
+        return avg_loss
+
+    def _train_step(self):
+        x, y = self._get_batch()
+        self.optimizer.zero_grad()
+        output = self.model(x)
+        loss = output
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+        
+        if self.rank == 0:
+            wandb.log({
+                "train_loss": loss.item(),
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+                "step": self.local_step
+            })
+
+    def _train(self, rank: int):
+        if rank == 0:
+            wandb.init(
+                project="llama-alpaca-finetune",
+                config={
+                    "learning_rate": self.config.optimizer_kwargs["lr"],
+                    "batch_size": self.config.batch_size,
+                    "num_epochs": self.config.num_epochs,
+                    "num_nodes": self.config.num_nodes,
+                    "model_name": self.config.model_kwargs["model_name"]
+                }
+            )
+        
+        try:
+            super()._train(rank)
+        finally:
+            if rank == 0:
+                wandb.finish()
+
 if __name__ == "__main__":
     torch.manual_seed(42)
     
     config = LlamaAlpacaConfig(
-        model_name="nunoFcul/llama3.1_1B_adapted",
+        model_name="meta-llama/Llama-3.2-1B",
         num_epochs=3,
         batch_size=1,
         num_nodes=2
@@ -205,5 +267,5 @@ if __name__ == "__main__":
         diloco_interval=config.diloco_interval
     )
     
-    trainer = DilocoSimulator(diloco_config)
+    trainer = WandBMonitor(diloco_config)
     trainer.train()
