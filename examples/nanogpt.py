@@ -15,6 +15,13 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from diloco_sim import DilocoSimulator, DilocoSimulatorConfig
+import argparse
+import numpy as np
+from transformers import GPT2Tokenizer
+from datasets import load_dataset
+import os
+import wandb
 
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
@@ -350,3 +357,230 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+# add diloco support
+def identity_loss(x, _):
+    return x
+
+class DilocoGPTWrapper(GPT):
+    """Minimal wrapper around GPT to make it compatible with diloco while preserving all original functionality"""
+    def forward(self, batch):
+        # Unpack the batch tuple - batch[0] contains the input tensor
+        idx = batch[0].to(self.lm_head.weight.device)
+        
+        # Get logits using parent's forward
+        logits = super().forward(idx)
+        
+        # Calculate loss using original nanoGPT logic
+        b, t, c = logits.shape
+        logits = logits.view(b*t, c)
+        targets = torch.roll(idx, shifts=-1, dims=1)
+        targets[:, -1] = -1  # The last prediction is not valid
+        targets = targets.contiguous().view(b*t)
+        loss = nn.functional.cross_entropy(logits, targets, ignore_index=-1)
+        
+        return loss  # Return scalar loss directly
+
+class NanoGPTTrainer(DilocoSimulator):
+    """DilocoSimulator with WandB logging for nanoGPT"""
+    
+    def _eval_model(self):
+        self.model.eval()
+        total_loss = 0
+        
+        with torch.no_grad():
+            for _ in range(self.config.eval_iters):
+                batch = self._get_batch(eval=True)
+                loss = self.model(batch)
+                total_loss += loss.item()
+                
+                if self.rank == 0:
+                    wandb.log({
+                        "eval_loss": loss.item(),
+                        "eval_perplexity": torch.exp(torch.tensor(loss.item())).item()
+                    })
+                    
+        avg_loss = total_loss / self.config.eval_iters
+        if self.rank == 0:
+            print(f"Eval Loss: {avg_loss}")
+            
+        self.model.train()
+        return avg_loss
+
+    def _train_step(self):
+        batch = self._get_batch()
+        self.optimizer.zero_grad()
+        loss = self.model(batch)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+        
+        if self.rank == 0:
+            wandb.log({
+                "train_loss": loss.item(),
+                "train_perplexity": torch.exp(torch.tensor(loss.item())).item(),
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+                "step": self.local_step
+            })
+
+    def _train(self, rank: int):
+        if rank == 0:
+            wandb.init(project="nanogpt-diloco")
+        try:
+            super()._train(rank)
+        finally:
+            if rank == 0:
+                wandb.finish()
+
+class GPTTrainDataset(torch.utils.data.Dataset):
+    """Simple dataset wrapper for training data"""
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
+        
+    def __len__(self):
+        return len(self.data) - self.block_size
+
+    def __getitem__(self, idx):
+        x = self.data[idx:idx + self.block_size]
+        return x, x
+
+def get_dataset(args):
+    print(f"Loading dataset: {args.dataset}")
+    
+    # Load tokenizer
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    # Load dataset
+    if args.dataset == "shakespeare":
+        dataset = load_dataset("Trelis/tiny-shakespeare")
+        text_column = "Text"
+    elif args.dataset == "wikitext":
+        dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+        text_column = "text"
+    elif args.dataset == "code":
+        dataset = load_dataset("codeparrot/codeparrot-clean-train", split="train[:1%]")
+        text_column = "content"
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+    
+    print(f"Dataset loaded. Structure: {dataset}")
+    
+    def tokenize_function(examples):
+        return tokenizer(examples[text_column], truncation=True, max_length=args.block_size)
+    
+    # Tokenize dataset
+    print("Tokenizing dataset...")
+    tokenized_dataset = dataset.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=dataset["train"].column_names
+    )
+    
+    # Convert to torch tensors
+    def convert_to_tensor(examples):
+        all_ids = []
+        for ids in examples["input_ids"]:
+            if len(ids) > 0:  # Skip empty sequences
+                all_ids.extend(ids + [tokenizer.eos_token_id])
+        
+        if len(all_ids) == 0:
+            return {"input_ids": torch.tensor([])}
+            
+        # Make sure we have complete blocks
+        num_blocks = len(all_ids) // args.block_size
+        if num_blocks == 0:
+            return {"input_ids": torch.tensor([])}
+            
+        all_ids = all_ids[:num_blocks * args.block_size]
+        tensor_data = torch.tensor(all_ids).view(-1, args.block_size)
+        return {"input_ids": tensor_data}
+    
+    print("Converting to tensors...")
+    tensor_dataset = tokenized_dataset.map(
+        convert_to_tensor,
+        batched=True,
+        remove_columns=tokenized_dataset["train"].column_names
+    )
+    
+    # Extract and concatenate all tensors
+    train_data = torch.cat([torch.as_tensor(x) for x in tensor_dataset["train"]["input_ids"] if len(x) > 0], dim=0)
+    val_data = torch.cat([torch.as_tensor(x) for x in tensor_dataset["test"]["input_ids"] if len(x) > 0], dim=0)
+    
+    print(f"Train data size: {train_data.shape}, Val data size: {val_data.shape}")
+    return train_data, val_data, tokenizer.vocab_size
+
+def main():
+    # Command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default='shakespeare', 
+                      help='which dataset to use (shakespeare, wikitext, code)')
+    parser.add_argument('--num_nodes', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=12)
+    parser.add_argument('--block_size', type=int, default=1024)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--learning_rate', type=float, default=6e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-1)
+    parser.add_argument('--beta1', type=float, default=0.9)
+    parser.add_argument('--beta2', type=float, default=0.95)
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    parser.add_argument('--seed', type=int, default=1337)
+    args = parser.parse_args()
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    # Load dataset from HuggingFace
+    train_data, val_data, vocab_size = get_dataset(args)
+    
+    # Create datasets
+    train_dataset = GPTTrainDataset(train_data, args.block_size)
+    val_dataset = GPTTrainDataset(val_data, args.block_size)
+
+    # Create model config
+    gpt_config = GPTConfig(
+        block_size=args.block_size,
+        vocab_size=vocab_size,
+        n_layer=12,  # Use smaller model for testing, adjust as needed
+        n_head=12,
+        n_embd=768
+    )
+
+    # Create diloco config
+    diloco_config = DilocoSimulatorConfig(
+        model_cls=DilocoGPTWrapper,
+        model_kwargs={"config": gpt_config},
+        optimizer_kwargs={
+            "weight_decay": args.weight_decay,
+            "lr": args.learning_rate,
+            "betas": (args.beta1, args.beta2)
+        },
+        loss_fn=identity_loss,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        batch_size=args.batch_size,
+        num_epochs=args.epochs,
+        save_dir=args.checkpoint_dir,
+        eval_iters=200,
+        ckpt_interval=1000,
+        num_nodes=args.num_nodes,
+        diloco_interval=1000
+    )
+
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    # Initialize trainer and start training
+    print("Initializing trainer...")
+    trainer = NanoGPTTrainer(diloco_config)
+    print("Starting training...")
+    trainer.train()
+
+if __name__ == '__main__':
+    main()
