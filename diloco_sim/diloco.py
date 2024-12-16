@@ -63,11 +63,13 @@ class DilocoSimulator(Evaluator):
         return loss.item()
 
     def _log_train(self, train_stats: TrainStats):
+        lr = self.optimizer.param_groups[0]["lr"]
         self.pbar.update(1)
         self.pbar.set_postfix(
             {
                 "loss": f"{train_stats.loss:.4f}",
                 "perplexity": f"{train_stats.perplexity:.4f}",
+                "lr": f"{lr:.4f}",
             }
         )
 
@@ -78,6 +80,7 @@ class DilocoSimulator(Evaluator):
                 "step": self.local_step,
                 "train_loss": train_stats.loss,
                 "train_perplexity": train_stats.perplexity,
+                "learning_rate": lr,
             }
         )
 

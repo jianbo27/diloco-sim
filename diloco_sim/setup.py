@@ -5,10 +5,11 @@ from torch.distributed import init_process_group as init_process_group, destroy_
 import torch.distributed as dist
 from copy import deepcopy
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR
 from .config import DilocoSimulatorConfig
 import wandb
 from tqdm import tqdm
+import math
 
 
 class DilocoSetup:
@@ -90,9 +91,22 @@ class DilocoSetup:
     def _setup_scheduler(self):
         if self.rank == 0:
             print("Setting up scheduler")
-        self.scheduler = (
-            CosineAnnealingLR(self.optimizer, T_max=self.max_local_step) if self.config.cosine_anneal else None
-        )
+
+        def lr_lambda(current_step):
+            if current_step < self.config.warmup_steps:
+                # Linear warmup
+                return float(current_step) / float(max(self.config.warmup_steps, 1))
+            elif self.config.cosine_annealing:
+                # Cosine annealing
+                progress = (current_step - self.config.warmup_steps) / float(
+                    max(1, self.config.max_local_step - self.config.warmup_steps)
+                )
+                return 0.5 * (1.0 + math.cos(math.pi * progress))
+            else:
+                # Default constant LR after warmup
+                return 1.0
+
+        return LambdaLR(self.optimizer, lr_lambda)
 
     def _setup_train_dataloader(self):
         if self.rank == 0:
