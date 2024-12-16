@@ -3,15 +3,18 @@ import torch.distributed as dist
 from tqdm import tqdm
 from .config import DilocoSimulatorConfig
 from .setup import DilocoSetup
-from .comm import CommunicationSimulator
 from .eval import Evaluator
-import logging
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from dataclasses import dataclass
+import wandb
 
 
-class DilocoSimulator(CommunicationSimulator, Evaluator):
+@dataclass
+class TrainStats:
+    loss: float
+    perplexity: float
+
+
+class DilocoSimulator(Evaluator):
 
     def __init__(self, config: DilocoSimulatorConfig) -> None:
         super().__init__(config)
@@ -34,7 +37,6 @@ class DilocoSimulator(CommunicationSimulator, Evaluator):
             param.data = self.model.state_dict()[name].data.to("cpu")
 
     def _outer_step(self) -> None:
-        super()._outer_step()
         self._average_models()
 
         if self.rank == 0:
@@ -46,7 +48,6 @@ class DilocoSimulator(CommunicationSimulator, Evaluator):
         self._broadcast_model_params()
 
     def _train_step(self):
-        super()._train_step()
         x, y = self._get_batch()
         self.optimizer.zero_grad()
         output = self.model(x)
@@ -56,12 +57,31 @@ class DilocoSimulator(CommunicationSimulator, Evaluator):
         if self.scheduler:
             self.scheduler.step()
 
+        if self.rank == 0:
+            self._log_train(TrainStats(loss=loss.item(), perplexity=torch.exp(loss).item()))
+
         return loss.item()
 
-    def _train_loop(self):
+    def _log_train(self, train_stats: TrainStats):
+        self.pbar.update(1)
+        self.pbar.set_postfix(
+            {
+                "loss": f"{train_stats.loss:.4f}",
+                "perplexity": f"{train_stats.perplexity:.4f}",
+            }
+        )
 
-        pbar = tqdm(total=self.max_local_step)
-        self.model.train()
+        if self.config.wandb_project is None:
+            return
+        wandb.log(
+            {
+                "step": self.local_step,
+                "train_loss": train_stats.loss,
+                "train_perplexity": train_stats.perplexity,
+            }
+        )
+
+    def _train_loop(self):
 
         while self.local_step < self.max_local_step:
 
@@ -69,20 +89,10 @@ class DilocoSimulator(CommunicationSimulator, Evaluator):
 
             if self.local_step % self.config.diloco_interval == 0:
                 self._outer_step()
-                if self.rank == 0 and self.config.eval_dataset:
+                if self.rank == 0:
                     self._evaluate()
 
             self.local_step += 1
-            pbar.update(1)
-            pbar.set_postfix(
-                {
-                    "train_time": self.train_time + self.communication_time,
-                    "loss": f"{loss:.4f}",
-                    "epoch": self.epoch,
-                }
-            )
-
-        pbar.close()
 
     def _train(self, rank: int):
         try:

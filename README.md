@@ -50,3 +50,14 @@ The full list of available arguments is shown below:
 | `cosine_anneal`      | `bool`                 | `False`                     | Whether to use cosine annealing for learning rate scheduling. Default is `False`. |
 | `train_loss_hook`    | `(TrainStats) -> None` | `None`                      | Function to call after each local step. Default is `None`. `TrainStats` is a dataclass defined below.                   |
 | `eval_loss_hook`     | `(EvalStats) -> None` | `None`                      | Function to call after each evaluation. Default is `None`. `EvalStats` is a dataclass defined below.                    |
+
+
+
+
+
+
+
+
+
+
+

@@ -1,6 +1,7 @@
 outputs/
-data/
 wandb/
+data/
+data/owt/prepare.py
 *.bin
 
 # Byte-compiled / optimized / DLL files

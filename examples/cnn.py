@@ -5,6 +5,7 @@ from torchvision.datasets import MNIST, CIFAR100
 import torch.nn.functional as F
 import torch.nn as nn
 from torchvision import models
+import torch.distributed as dist
 
 
 class CNNModel(nn.Module):
@@ -60,6 +61,17 @@ class ResNetForCIFAR100(nn.Module):
 
     def forward(self, x):
         return self.resnet(x)
+
+
+class DiLocoWeightedAverage(DilocoSimulator):
+    def _average_models(self) -> None:
+        self.node_weights = [1.0] * self.config.num_nodes  # do some intelligent weighting here
+        total_weight = sum(self.node_weights)
+
+        for param in self.model.parameters():
+            param.data *= self.node_weights[self.rank]
+            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+            param.data /= total_weight
 
 
 if __name__ == "__main__":

@@ -7,9 +7,8 @@ from copy import deepcopy
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from .config import DilocoSimulatorConfig
-import logging
-
-logger = logging.getLogger(__name__)
+import wandb
+from tqdm import tqdm
 
 
 class DilocoSetup:
@@ -35,10 +34,14 @@ class DilocoSetup:
         )
         if self.config.max_local_step:
             self.max_local_step = min(self.max_local_step, self.config.max_local_step)
-        self._initialize_logging()
 
     def _initialize_logging(self) -> None:
-        logger.info("DilocoSimulator initialized with config: %s", self.config)
+        print(f"DilocoSimulator initialized with config: {self.config}")
+        self.pbar = tqdm(total=self.max_local_step)
+        self.model.train()
+
+        if self.config.wandb_project:
+            wandb.init(project=self.config.wandb_project, config=self.config.__dict__)
 
     def _initialize_distributed(self, rank: int):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -54,33 +57,46 @@ class DilocoSetup:
         torch.cuda.set_device(self.device) if self.device.type == "cuda" else None
 
     def _cleanup(self):
+        if self.rank == 0:
+            wandb.finish()
+            self.pbar.close()
         if dist.is_initialized():
             destroy_process_group()
 
     def _setup_master_model(self):
+        print("Setting up master model")
         self.master_model = deepcopy(self.model).to("cpu")
         for param in self.master_model.parameters():
             param.requires_grad = True
 
     def _setup_master_optimizer(self):
+        print("Setting up master optimizer")
         self.master_optimizer = self.config.outer_optimizer_cls(
             self.master_model.parameters(), **self.config.outer_optimizer_kwargs
         )
 
     def _setup_model(self):
+        if self.rank == 0:
+            print("Setting up model")
         self.model = self.config.model_cls(**self.config.model_kwargs).to(self.device)
         for name, param in self.model.named_parameters():
             dist.broadcast(param.data, src=0)
 
     def _setup_optimizer(self):
+        if self.rank == 0:
+            print("Setting up optimizer")
         self.optimizer = self.config.optimizer_cls(self.model.parameters(), **self.config.optimizer_kwargs)
 
     def _setup_scheduler(self):
+        if self.rank == 0:
+            print("Setting up scheduler")
         self.scheduler = (
             CosineAnnealingLR(self.optimizer, T_max=self.max_local_step) if self.config.cosine_anneal else None
         )
 
     def _setup_train_dataloader(self):
+        if self.rank == 0:
+            print("Setting up train dataloader")
         sampler = DistributedSampler(
             self.config.train_dataset, num_replicas=self.config.num_nodes, rank=self.rank, shuffle=True, drop_last=True
         )  # May want to do different data split between workers when looping over epochs
@@ -90,6 +106,8 @@ class DilocoSetup:
         self.train_data_iter = iter(self.train_dataloader)
 
     def _setup_eval_dataloader(self):
+        if self.rank == 0:
+            print("Setting up eval dataloader")
         self.eval_dataloader = DataLoader(
             self.config.eval_dataset, batch_size=self.config.batch_size, pin_memory=True, shuffle=True
         )
@@ -99,7 +117,7 @@ class DilocoSetup:
         torch.save(self.model.state_dict(), os.path.join(self.config.save_dir, f"model_{self.epoch}.pt"))
 
     def _get_batch(self, eval=False):
-        if not eval:
+        if not eval or self.eval_data_iter is None:
             try:
                 x, y = next(self.train_data_iter)
             except StopIteration:
@@ -124,7 +142,13 @@ class DilocoSetup:
         self._setup_scheduler()
         self._setup_train_dataloader()
         if self.rank == 0:
+            self._initialize_logging()
             self._setup_master_model()
             self._setup_master_optimizer()
             if self.config.eval_dataset:
                 self._setup_eval_dataloader()
+
+    def load_model(self, path):
+        self.master_model.load_state_dict(torch.load(path))
+        for model in self.models:
+            model.load_state_dict(self.master_model.state_dict())

@@ -14,16 +14,15 @@ class DilocoSimulatorConfig:
     batch_size: int = 16
     eval_dataset: Optional[torch.utils.data.Dataset] = None
     ckpt_interval: Optional[int] = None  # num of outersteps to save model
-    eval_iters: int = 50
+    eval_iters: int = 400
     save_dir: Optional[str] = None
     num_epochs: int = 1
     cosine_anneal: bool = False
+    warmup_steps: int = 0
     model_path: Optional[str] = None
     num_nodes: int = 4
     diloco_interval: int = 500
     outer_optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.SGD
     outer_optimizer_kwargs: dict = field(default_factory=lambda: {"lr": 0.7, "nesterov": True, "momentum": 0.9})
     max_local_step: Optional[int] = None
-    network_delay: float = 0.0
-    network_bandwidth: float = 10000000000.0
-    flop_per_second_per_node: float = 10000000000.0
+    wandb_project: Optional[str] = None
