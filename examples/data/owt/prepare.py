@@ -25,13 +25,22 @@ def tokenize_dataset_with_eot(dataset, tokenizer, eot_token_id):
 
 
 # Save the tokenized dataset into a .bin file
-def save_tokenized_to_bin(tokenized_dataset, output_file):
-    # Use tqdm to display progress while iterating over the dataset
+def save_tokenized_to_bin(tokenized_dataset, output_file, batch_size=1000):
     with open(output_file, "wb") as f:
-        for entry in tqdm(tokenized_dataset, desc="Saving to .bin file", unit="entries"):
+        buffer = []
+        for idx, entry in enumerate(tqdm(tokenized_dataset, desc="Saving to .bin file", unit="entries")):
             input_ids = entry["input_ids"]
-            # Convert to NumPy array and save in binary format
-            input_ids_np = np.array(input_ids, dtype=np.uint16)
+            buffer.extend(input_ids)  # Collect all input_ids in a buffer
+
+            # Write to file in batches
+            if (idx + 1) % batch_size == 0:
+                input_ids_np = np.array(buffer, dtype=np.uint16)
+                input_ids_np.tofile(f)
+                buffer = []  # Reset the buffer
+
+        # Write remaining entries
+        if buffer:
+            input_ids_np = np.array(buffer, dtype=np.uint16)
             input_ids_np.tofile(f)
 
 
