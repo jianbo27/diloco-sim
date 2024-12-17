@@ -38,7 +38,7 @@ class DilocoSetup:
             self.max_local_step = min(self.max_local_step, self.config.max_local_step)
 
         if self.config.wandb_project:
-            wandb.login(api_key=os.environ["WANDB_API_KEY"])
+            wandb.login()
 
     def _initialize_logging(self) -> None:
         print(f"DilocoSimulator initialized with config: {self.config}")
