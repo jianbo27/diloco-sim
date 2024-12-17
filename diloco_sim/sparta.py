@@ -17,6 +17,7 @@ class SpartaInterpolator(DilocoSetup):
                 if not param.requires_grad:
                     continue
                 indices = self.index_selector.get_indices(param)
+                dist.broadcast(indices, src=0)
                 sparse_data = param.data[indices]
                 dist.all_reduce(sparse_data, op=dist.ReduceOp.SUM)
                 sparse_data /= self.config.num_nodes
