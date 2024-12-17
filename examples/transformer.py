@@ -33,11 +33,9 @@ if __name__ == "__main__":
     parser.add_argument("--diloco_interval", type=int, nargs="+", default=500)
     parser.add_argument("--cosine_anneal", type=str2bool, nargs="+", default=False)
     parser.add_argument("--warmup_steps", type=int, nargs="+", default=0)
-    parser.add_argument("--vocab_size", type=int, nargs="+", default=50304)
-    parser.add_argument("--block_size", type=int, nargs="+", default=256)
-    parser.add_argument("--num_layers", type=int, nargs="+", default=4)
-    parser.add_argument("--num_heads", type=int, nargs="+", default=8)
-    parser.add_argument("--embed_size", type=int, nargs="+", default=128)
+    parser.add_argument(
+        "--model_size", type=str, nargs="+", default="small", choices=["small", "base", "medium", "large", "xl"]
+    )
     parser.add_argument("--seed", type=int, nargs="+", default=None)
     parser.add_argument("--dataset_path", type=str, default="data/owt/openwebtext.bin")
     parser.add_argument("--profile", action="store_true")
@@ -55,13 +53,13 @@ if __name__ == "__main__":
             np.random.seed(args.seed)
             random.seed(args.seed)
 
-        gptconf = GPTConfig(
-            block_size=args.block_size,
-            vocab_size=args.vocab_size,
-            n_layer=args.num_layers,
-            n_head=args.num_heads,
-            n_embd=args.embed_size,
-        )
+        gptconf = {
+            "gpt2_small": GPTConfig.gpt2_small,
+            "gpt2_base": GPTConfig.gpt2_base,
+            "gpt2_medium": GPTConfig.gpt2_medium,
+            "gpt2_large": GPTConfig.gpt2_large,
+            "gpt2_xl": GPTConfig.gpt2_xl,
+        }[args.model_size]()
 
         train_dataset = TextDataset(
             args.dataset_path,

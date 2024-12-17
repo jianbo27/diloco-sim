@@ -100,10 +100,8 @@ class DilocoSetup:
 
         def lr_lambda(current_step):
             if current_step < self.config.warmup_steps:
-                # Linear warmup
                 return float(current_step) / float(max(self.config.warmup_steps, 1))
             elif self.config.cosine_anneal:
-                # Cosine annealing
                 progress = (current_step - self.config.warmup_steps) / float(
                     max(1, self.config.max_local_step - self.config.warmup_steps)
                 )
@@ -112,7 +110,7 @@ class DilocoSetup:
                 # Default constant LR after warmup
                 return 1.0
 
-        return LambdaLR(self.optimizer, lr_lambda)
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
 
     def _setup_train_dataloader(self):
         if self.rank == 0:
