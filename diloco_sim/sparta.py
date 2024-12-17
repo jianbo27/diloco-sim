@@ -12,12 +12,15 @@ class SpartaInterpolator(DilocoSetup):
         self.index_selector = PartitionedIndexSelector(self.config.p_sparta)
 
     def _interpolate_models(self):
-        for param in self.model.parameters():
-            indices = self.index_selector.get_indices(param)
-            sparse_data = param.data[indices]
-            dist.all_reduce(sparse_data, op=dist.ReduceOp.SUM)
-            sparse_data /= self.config.num_nodes
-            param.masked_scatter_(indices, sparse_data)
+        with torch.no_grad():
+            for param in self.model.parameters():
+                if not param.requires_grad:
+                    continue
+                indices = self.index_selector.get_indices(param)
+                sparse_data = param.data[indices]
+                dist.all_reduce(sparse_data, op=dist.ReduceOp.SUM)
+                sparse_data /= self.config.num_nodes
+                param.masked_scatter_(indices, sparse_data)
 
 
 class IndexSelector:
