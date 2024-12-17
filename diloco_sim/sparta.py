@@ -38,8 +38,6 @@ class PartitionedIndexSelector(IndexSelector):
     def __init__(self, p):
         super().__init__(p)
 
-        self._set_partitions()
-
     def _set_partition(self, param):
         param_state = self.state[param]
         param_state["curr_partition"] = 0
