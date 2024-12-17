@@ -54,11 +54,11 @@ if __name__ == "__main__":
             random.seed(args.seed)
 
         gptconf = {
-            "gpt2_small": GPTConfig.gpt2_small,
-            "gpt2_base": GPTConfig.gpt2_base,
-            "gpt2_medium": GPTConfig.gpt2_medium,
-            "gpt2_large": GPTConfig.gpt2_large,
-            "gpt2_xl": GPTConfig.gpt2_xl,
+            "small": GPTConfig.gpt2_small,
+            "base": GPTConfig.gpt2_base,
+            "medium": GPTConfig.gpt2_medium,
+            "large": GPTConfig.gpt2_large,
+            "xl": GPTConfig.gpt2_xl,
         }[args.model_size]()
 
         train_dataset = TextDataset(
