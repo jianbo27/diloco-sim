@@ -37,10 +37,12 @@ class DilocoSetup:
         if self.config.max_local_step:
             self.max_local_step = min(self.max_local_step, self.config.max_local_step)
 
+        if self.config.wandb_project:
+            wandb.login(api_key=os.environ["WANDB_API_KEY"])
+
     def _initialize_logging(self) -> None:
         print(f"DilocoSimulator initialized with config: {self.config}")
         self.pbar = tqdm(total=self.max_local_step)
-        self.model.train()
 
         if self.config.wandb_project:
             wandb.init(project=self.config.wandb_project, config=self.config.__dict__)
@@ -84,6 +86,8 @@ class DilocoSetup:
         self.model = self.config.model_cls(**self.config.model_kwargs).to(self.device)
         for name, param in self.model.named_parameters():
             dist.broadcast(param.data, src=0)
+
+        self.model.train()
 
     def _setup_optimizer(self):
         if self.rank == 0:
