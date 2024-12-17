@@ -60,6 +60,7 @@ class DilocoSetup:
     def _cleanup(self):
         if self.rank == 0:
             wandb.finish()
+        if self.pbar:
             self.pbar.close()
         if dist.is_initialized():
             destroy_process_group()
@@ -96,7 +97,7 @@ class DilocoSetup:
             if current_step < self.config.warmup_steps:
                 # Linear warmup
                 return float(current_step) / float(max(self.config.warmup_steps, 1))
-            elif self.config.cosine_annealing:
+            elif self.config.cosine_anneal:
                 # Cosine annealing
                 progress = (current_step - self.config.warmup_steps) / float(
                     max(1, self.config.max_local_step - self.config.warmup_steps)
