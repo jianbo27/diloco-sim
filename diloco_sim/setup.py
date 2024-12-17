@@ -27,6 +27,7 @@ class DilocoSetup:
     max_local_step: int
     local_step: int = 0
     epoch: int = 0
+    pbar: Optional[tqdm] = None
 
     def __init__(self, config: DilocoSimulatorConfig) -> None:
         self.config = config
