@@ -59,6 +59,7 @@ class DilocoSetup:
         )
         self.device = torch.device(f"cuda:{rank % torch.cuda.device_count()}" if torch.cuda.is_available() else "cpu")
         torch.cuda.set_device(self.device) if self.device.type == "cuda" else None
+        print(f"Initialized process group with rank {rank} on device {self.device}")
 
     def _cleanup(self):
         if self.rank == 0:
