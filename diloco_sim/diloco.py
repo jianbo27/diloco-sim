@@ -4,6 +4,7 @@ from tqdm import tqdm
 from .config import DilocoSimulatorConfig
 from .setup import DilocoSetup
 from .eval import Evaluator
+from .sparta import SpartaInterpolator
 from dataclasses import dataclass
 import wandb
 
@@ -14,7 +15,7 @@ class TrainStats:
     perplexity: float
 
 
-class DilocoSimulator(Evaluator):
+class DilocoSimulator(Evaluator, SpartaInterpolator):
 
     def __init__(self, config: DilocoSimulatorConfig) -> None:
         super().__init__(config)
@@ -87,6 +88,9 @@ class DilocoSimulator(Evaluator):
     def _train_loop(self):
 
         while self.local_step < self.max_local_step:
+
+            if self.config.p_sparta > 0.0:
+                self._interpolate_models()
 
             loss = self._train_step()
 

@@ -17,6 +17,7 @@ class DilocoSimulatorConfig:
     eval_iters: int = 400
     save_dir: Optional[str] = None
     num_epochs: int = 1
+    p_sparta: float = 0.0
     cosine_anneal: bool = False
     warmup_steps: int = 0
     model_path: Optional[str] = None
