@@ -84,7 +84,11 @@ if __name__ == "__main__":
             wandb_project=args.wandb_project,
             eval_iters=args.eval_iters,
             diloco_interval=args.diloco_interval,
-            outer_optimizer_kwargs={"lr": args.outer_learning_rate, "momentum": args.outer_momentum, "nesterov": args.nesterov},
+            outer_optimizer_kwargs={
+                "lr": args.outer_learning_rate,
+                "momentum": args.outer_momentum,
+                "nesterov": args.nesterov,
+            },
             cosine_anneal=args.cosine_anneal,
             warmup_steps=args.warmup_steps,
             p_sparta=args.p_sparta,
@@ -102,14 +106,14 @@ if __name__ == "__main__":
         elif args.generate:
             generate_text(diloco_sim.master_model)
         elif args.profile:
-            with profiler.profile(
-                schedule=profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-                on_trace_ready=profiler.tensorboard_trace_handler(f"./log/rank_{rank}"),
-                record_shapes=True,
-                with_stack=True
-            ) as prof:
-                for epoch in range(3):
-                    
+            # with profiler.profile(
+            #     schedule=profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            #     on_trace_ready=profiler.tensorboard_trace_handler(f"./log/rank_{rank}"),
+            #     record_shapes=True,
+            #     with_stack=True
+            # ) as prof:
+            #     for epoch in range(3):
+            pass
 
             # cuda_is_available = torch.cuda.is_available()
 
