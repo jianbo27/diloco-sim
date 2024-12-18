@@ -23,6 +23,7 @@ if __name__ == "__main__":
     parser.add_argument("--p_sparta", "-p", type=float, nargs="+", default=0.0)
     parser.add_argument("--learning_rate", "-lr", type=float, nargs="+", default=0.001)
     parser.add_argument("--outer_learning_rate", type=float, nargs="+", default=0.7)
+    parser.add_argument("--nesterov", type=str2bool, nargs="+", default=True)
     parser.add_argument("--outer_momentum", type=float, nargs="+", default=0.9)
     parser.add_argument("--max_local_step", type=int, nargs="+", default=5000)
     parser.add_argument("--save_dir", type=str, nargs="+", default=None)
@@ -83,7 +84,7 @@ if __name__ == "__main__":
             wandb_project=args.wandb_project,
             eval_iters=args.eval_iters,
             diloco_interval=args.diloco_interval,
-            outer_optimizer_kwargs={"lr": args.outer_learning_rate, "momentum": args.outer_momentum, "nesterov": True},
+            outer_optimizer_kwargs={"lr": args.outer_learning_rate, "momentum": args.outer_momentum, "nesterov": args.nesterov},
             cosine_anneal=args.cosine_anneal,
             warmup_steps=args.warmup_steps,
             p_sparta=args.p_sparta,
@@ -101,7 +102,14 @@ if __name__ == "__main__":
         elif args.generate:
             generate_text(diloco_sim.master_model)
         elif args.profile:
-            pass
+            with profiler.profile(
+                schedule=profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+                on_trace_ready=profiler.tensorboard_trace_handler(f"./log/rank_{rank}"),
+                record_shapes=True,
+                with_stack=True
+            ) as prof:
+                for epoch in range(3):
+                    
 
             # cuda_is_available = torch.cuda.is_available()
 
