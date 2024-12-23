@@ -1,1 +1,2 @@
 from .diloco import DilocoSimulator, DilocoSimulatorConfig
+from .sequential_diloco import SequentialDilocoSimulator, SequentialDilocoConfig
