@@ -52,7 +52,9 @@ class DilocoSetup:
         os.environ["MASTER_PORT"] = "12355"
         self.rank = rank
         init_process_group(
-            backend="nccl" if torch.cuda.is_available() else "gloo",
+            backend=(
+                "nccl" if torch.cuda.is_available() and self.config.num_nodes == torch.cuda.device_count() else "gloo"
+            ),
             # init_method="env://",
             rank=rank,
             world_size=self.config.num_nodes,
