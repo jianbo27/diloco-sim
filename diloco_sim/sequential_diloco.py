@@ -6,6 +6,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from copy import deepcopy
 import os
 from tqdm import tqdm
+import time
 
 
 @dataclass
@@ -141,6 +142,8 @@ class SetupSequentialSimulator:
 class SequentialDilocoSimulator(SetupSequentialSimulator):
     def __init__(self, config: SequentialDilocoConfig) -> None:
         super().__init__(config)
+        self.eval_losses = []
+        self.eval_accuracies = []
 
     def _eval_model(self):
         self.models[0].eval()  # Evaluate the first model after averaging
@@ -157,6 +160,9 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
 
         avg_loss = sum(losses) / len(losses)
         accuracy = correct / (self.config.eval_iters * self.config.batch_size)
+
+        self.eval_losses.append(avg_loss)
+        self.eval_accuracies.append(accuracy)
 
         print(f"Eval Loss: {avg_loss:.4f}")
         print(f"Eval Accuracy: {accuracy:.4f}")
@@ -233,8 +239,27 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
         pbar.close()
 
     def train(self):
+        start_time = time.time()
         self._setup()
         self._train_loop()
-        
+
         if self.config.save_dir:
             self._save_checkpoint()
+            
+        # Print final stats
+        print("\n" + "="*50)
+        
+        # Get final evaluation metrics
+        final_eval_loss = self.eval_losses[-1] if self.eval_losses else None
+        final_eval_accuracy = self.eval_accuracies[-1] if self.eval_accuracies else None
+        
+        # Print summary
+        total_time = time.time() - start_time
+        print(f"Total training time: {total_time:.2f} seconds")
+
+        if torch.cuda.is_available():
+            max_gpu_memory = torch.cuda.max_memory_allocated() / (1024**3)  # Convert to GB
+            print(f"GPU memory: {max_gpu_memory:.2f} GB")
+
+        print("=" * 50 + "\n")
+        return final_eval_loss

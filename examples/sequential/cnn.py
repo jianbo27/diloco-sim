@@ -5,6 +5,8 @@ from torchvision.datasets import MNIST, CIFAR100
 import torch.nn.functional as F
 import torch.nn as nn
 from torchvision import models
+import os
+import time
 
 
 class CNNModel(nn.Module):
@@ -59,9 +61,39 @@ class ResNetForCIFAR100(nn.Module):
     def forward(self, x):
         return self.resnet(x)
 
+class CustomSequentialDilocoSimulator(SequentialDilocoSimulator):
+    def train(self):
+        start_time = time.time()
+        # Call parent's train method but track the loss ourselves
+        super().train()
+        total_time = time.time() - start_time
+        
+        # Get the final loss from the last evaluation
+        final_loss = self.eval_losses[-1] if hasattr(self, 'eval_losses') and self.eval_losses else None
+        final_acc = self.eval_accuracies[-1] if hasattr(self, 'eval_accuracies') and self.eval_accuracies else None
+        
+        # Log metrics in an easily parseable format
+        print(f"\n{'='*50}")
+        if final_loss is not None:
+            print(f"Final loss: {final_loss:.6f}")
+            print(f"Final accuracy: {final_acc:.4f}")
+        print(f"Total training time: {total_time:.2f} seconds")
+        
+        # Log GPU memory usage
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.max_memory_allocated() / 1024**3  # Convert to GB
+            print(f"GPU memory: {gpu_mem:.2f} GB")
+        
+        print(f"{'='*50}\n")
+        return final_loss
+
 
 if __name__ == "__main__":
     torch.manual_seed(12345)
+
+    # Print start time
+    print(f"\nStarting training at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
 
     # Define normalization for CIFAR100
     transform = transforms.Compose([
@@ -71,6 +103,11 @@ if __name__ == "__main__":
 
     train_dataset = CIFAR100(root="./data", train=True, transform=transform, download=True)
     test_dataset = CIFAR100(root="./data", train=False, transform=transform, download=True)
+
+    # Create save directory if it doesn't exist
+    save_dir = "./cnn_checkpoints"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     config = SequentialDilocoConfig(  # Use our sequential config
         model_cls=CNNModel,
@@ -89,9 +126,17 @@ if __name__ == "__main__":
         batch_size=32,
         diloco_interval=500,
         cosine_anneal=True,
-        save_dir="./checkpoints"
+        save_dir=save_dir
     )
 
+    # Print configuration details before training
+    print(f"Training Configuration:")
+    print(f"Number of nodes: {config.num_nodes}")
+    print(f"Batch size: {config.batch_size}")
+    print(f"Number of epochs: {config.num_epochs}")
+    print(f"DiLoCo interval: {config.diloco_interval}")
+    print(f"{'='*50}\n")
+
     # Initialize and train the sequential simulator
-    simulator = SequentialDilocoSimulator(config)
+    simulator = CustomSequentialDilocoSimulator(config)
     simulator.train()
