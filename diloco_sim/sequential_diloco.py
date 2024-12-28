@@ -144,6 +144,25 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
         super().__init__(config)
         self.eval_losses = []
         self.eval_accuracies = []
+        self.eval_steps = []
+        self.flops_count = 0
+
+    def _count_flops_for_batch(self, model, batch_size):
+        """Estimate FLOPs for one forward pass"""
+        total_flops = 0
+        # Count conv operations
+        for m in model.modules():
+            if isinstance(m, torch.nn.Conv2d):
+                # FLOPs = 2 * kernel_size^2 * in_channels * out_channels * output_size^2
+                output_size = (batch_size, m.out_channels, 
+                             self.config.model_kwargs["input_height"] // 2,  # Approximate due to pooling
+                             self.config.model_kwargs["input_width"] // 2)
+                kernel_flops = 2 * m.kernel_size[0] * m.kernel_size[1] * m.in_channels * m.out_channels
+                total_flops += kernel_flops * output_size[2] * output_size[3] * batch_size
+            elif isinstance(m, torch.nn.Linear):
+                # FLOPs = 2 * in_features * out_features
+                total_flops += 2 * m.in_features * m.out_features * batch_size
+        return total_flops
 
     def _eval_model(self):
         self.models[0].eval()  # Evaluate the first model after averaging
@@ -163,7 +182,9 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
 
         self.eval_losses.append(avg_loss)
         self.eval_accuracies.append(accuracy)
+        self.eval_steps.append(self.local_step)
 
+        print(f"Step: {self.local_step}")
         print(f"Eval Loss: {avg_loss:.4f}")
         print(f"Eval Accuracy: {accuracy:.4f}")
 
@@ -207,7 +228,7 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
     def _train_step(self):
         x, y = self._get_batch()
         
-        # Update each model sequentially
+        # Update each model sequentially and count FLOPs
         for model, optimizer, scheduler in zip(
             self.models, self.optimizers, self.schedulers
         ):
@@ -218,6 +239,9 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
             optimizer.step()
             if scheduler:
                 scheduler.step()
+            
+            # Update FLOPs count
+            self.flops_count += self._count_flops_for_batch(model, x.size(0))
 
     def _train_loop(self):
         pbar = tqdm(total=self.max_local_step)
@@ -242,24 +266,19 @@ class SequentialDilocoSimulator(SetupSequentialSimulator):
         start_time = time.time()
         self._setup()
         self._train_loop()
-
+        
         if self.config.save_dir:
             self._save_checkpoint()
-            
+        
         # Print final stats
         print("\n" + "="*50)
-        
-        # Get final evaluation metrics
-        final_eval_loss = self.eval_losses[-1] if self.eval_losses else None
-        final_eval_accuracy = self.eval_accuracies[-1] if self.eval_accuracies else None
-        
-        # Print summary
         total_time = time.time() - start_time
         print(f"Total training time: {total_time:.2f} seconds")
+        print(f"Total FLOPs: {self.flops_count:,}")
+        print(f"FLOPs per second: {self.flops_count/total_time:,.2f}")
 
         if torch.cuda.is_available():
             max_gpu_memory = torch.cuda.max_memory_allocated() / (1024**3)  # Convert to GB
             print(f"GPU memory: {max_gpu_memory:.2f} GB")
 
         print("=" * 50 + "\n")
-        return final_eval_loss
