@@ -66,13 +66,13 @@ run_experiment() {
     ' >> "$loss_file"
     
     # Extract GPU memory usage
-    gpu_mem=$(grep "GPU memory:" "$output_file" | tail -n 1 | awk '{print $NF}' || echo "N/A")
+    gpu_mem=$(grep "GPU memory:" "$output_file" | tail -n 1 | awk '{print $(NF-1)}' || echo "N/A")
     
     # Log results
     {
         echo "Nodes: $num_nodes"
         echo "Duration: $duration seconds"
-        echo "GPU Memory: $gpu_mem"
+        echo "GPU Memory: $gpu_mem GB"
         echo "Loss history saved to: $loss_file"
         echo "------------------------"
     } >> "$LOG_FILE"
@@ -131,9 +131,9 @@ try:
                     markersize=4,
                     markevery=2)
     
-    ax1.set_xlabel("Training Steps (×500)")
+    ax1.set_xlabel("Steps (×500)")
     ax1.set_ylabel("Loss")
-    ax1.set_title("Training Loss vs Steps")
+    ax1.set_title("Eval Loss vs Steps")
     ax1.grid(True, alpha=0.3)
     ax1.legend()
     
@@ -155,9 +155,9 @@ try:
                     markersize=4,
                     markevery=2)
     
-    ax2.set_xlabel("Training Steps (×500)")
+    ax2.set_xlabel("Steps (×500)")
     ax2.set_ylabel("Accuracy")
-    ax2.set_title("Training Accuracy vs Steps")
+    ax2.set_title("Eval Accuracy vs Steps")
     ax2.grid(True, alpha=0.3)
     ax2.legend()
     ax2.set_xticks(tick_positions)

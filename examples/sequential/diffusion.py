@@ -5,6 +5,9 @@ from datasets import load_dataset
 from torchvision import transforms
 from torch.utils.data import Dataset
 import os
+import time
+
+
 
 class ImageDataset(Dataset):
     def __init__(self, split="train"):
@@ -22,6 +25,7 @@ class ImageDataset(Dataset):
         x = self.transform(image)
         x = x.reshape(1, 28, 28)
         return x, x
+
 
 class DiffusionModel(torch.nn.Module):
     def __init__(self):
@@ -59,16 +63,32 @@ class DiffusionModel(torch.nn.Module):
         
         return torch.nn.functional.mse_loss(noise_pred, noise)
 
+
 class ModifiedSequentialDilocoSimulator(SequentialDilocoSimulator):
+    def __init__(self, config: SequentialDilocoConfig) -> None:
+        super().__init__(config)
+        self.eval_losses = []
+        self.start_time = None
+        self.flops_count = 0
+
+    def _count_flops_for_batch(self, model, batch_size):
+        """Estimate FLOPs for forward pass"""
+        total_flops = 0
+        # Count UNet operations (rough estimate)
+        total_params = sum(p.numel() for p in model.model.parameters() if p.requires_grad)
+        # Assuming each parameter is used once per forward pass
+        total_flops = total_params * batch_size * 2  # multiply by 2 for fwd+bwd
+        return total_flops
+
     def _eval_model(self):
-        """Override evaluation to use MSE loss instead of accuracy"""
+        """Modified evaluation for diffusion model"""
         self.models[0].eval()
         total_loss = 0
         steps = 0
 
         with torch.no_grad():
             for x, y in self.eval_dataloader:
-                x, y = x.to(self.device), y.to(self.device)
+                x = x.to(self.device)
                 loss = self.models[0](x)
                 total_loss += loss.item()
                 steps += 1
@@ -77,12 +97,56 @@ class ModifiedSequentialDilocoSimulator(SequentialDilocoSimulator):
                     break
 
         avg_loss = total_loss / steps
+        self.eval_losses.append(avg_loss)
+        
         print(f"Eval Loss: {avg_loss:.4f}")
         self.models[0].train()
         return avg_loss
 
+    def _train_step(self):
+        x, _ = self._get_batch()
+        
+        # Update each model sequentially and count FLOPs
+        for model, optimizer, scheduler in zip(
+            self.models, self.optimizers, self.schedulers
+        ):
+            optimizer.zero_grad()
+            loss = model(x)
+            loss.backward()
+            optimizer.step()
+            if scheduler:
+                scheduler.step()
+            
+            # Update FLOPs count
+            self.flops_count += self._count_flops_for_batch(model, x.size(0))
+
+    def train(self):
+        self.start_time = time.time()
+        self._setup()
+        self._train_loop()
+        
+        if self.config.save_dir:
+            self._save_checkpoint()
+        
+        # Print final stats
+        print("\n" + "="*50)
+        total_time = time.time() - self.start_time
+        print(f"Total training time: {total_time:.2f} seconds")
+        print(f"Total FLOPs: {self.flops_count:,}")
+        print(f"FLOPs per second: {self.flops_count/total_time:,.2f}")
+
+        if torch.cuda.is_available():
+            max_gpu_memory = torch.cuda.max_memory_allocated() / (1024**3)  # Convert to GB
+            print(f"GPU memory: {max_gpu_memory:.2f} GB")
+        print("=" * 50 + "\n")
+        
+        return self.eval_losses[-1] if self.eval_losses else None
+
+
 if __name__ == "__main__":
-    save_dir = "./diffusion_diloco_checkpoints"
+    torch.manual_seed(12345)
+    
+    save_dir = "./diffusion_checkpoints"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
@@ -99,7 +163,7 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         loss_fn=lambda x, y: x,
-        num_epochs=100,
+        num_epochs=50,  # Reduced for benchmarking
         num_nodes=4,
         batch_size=16,
         diloco_interval=100,
@@ -108,6 +172,5 @@ if __name__ == "__main__":
         save_dir=save_dir
     )
     
-    # Use our modified simulator instead of the original
     simulator = ModifiedSequentialDilocoSimulator(config)
     simulator.train()
