@@ -386,28 +386,80 @@ def identity_loss(x, _):
 
 
 class DilocoGPTWrapper(GPT):
-    """Minimal wrapper around GPT to make it compatible with diloco while preserving all original functionality"""
+    """Wrapper that handles both training and evaluation consistently"""
 
     def forward(self, batch):
-        # Unpack the batch tuple - batch[0] contains the input tensor
-        idx = batch[0].to(self.lm_head.weight.device)
-
+        # Handle both single tensors and tuples
+        if isinstance(batch, tuple):
+            if len(batch) == 2:
+                # Training mode with (input, target)
+                idx, targets = batch[0].to(self.lm_head.weight.device), batch[1].to(self.lm_head.weight.device)
+            else:
+                # Single input in tuple
+                idx = batch[0].to(self.lm_head.weight.device)
+                targets = None
+        else:
+            # Direct tensor input (evaluation)
+            idx = batch.to(self.lm_head.weight.device)
+            targets = None
+            
+        # Add batch dimension if missing
+        if len(idx.shape) == 1:
+            idx = idx.unsqueeze(0)
+            
         # Get logits using parent's forward
         logits = super().forward(idx)
 
-        # Calculate loss using original nanoGPT logic
+        # If no targets provided (evaluation), generate targets
+        if targets is None:
+            targets = torch.roll(idx, shifts=-1, dims=1)
+            targets[:, -1] = -1
+
+        # Calculate loss
         b, t, c = logits.shape
         logits = logits.view(b * t, c)
-        targets = torch.roll(idx, shifts=-1, dims=1)
-        targets[:, -1] = -1  # The last prediction is not valid
         targets = targets.contiguous().view(b * t)
         loss = nn.functional.cross_entropy(logits, targets, ignore_index=-1)
 
-        return loss  # Return scalar loss directly
+        return loss
+
+
+class GPTTrainDataset(torch.utils.data.Dataset):
+    """Dataset wrapper for both training and evaluation"""
+    
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
+
+    def __len__(self):
+        return len(self.data) - self.block_size
+
+    def __getitem__(self, idx):
+        x = self.data[idx:idx + self.block_size]
+        y = torch.roll(x, shifts=-1)  # Next tokens are the targets
+        y[-1] = -1  # Mask the last target
+        return x, y  # Return both input and target
 
 
 class NanoGPTTrainer(DilocoSimulator):
-    """DilocoSimulator with WandB logging for nanoGPT"""
+    """DilocoSimulator with optional WandB logging"""
+    
+    def __init__(self, config):
+        super().__init__(config)
+        self.wandb_initialized = False
+        self.use_wandb = config.wandb_project is not None
+
+    def _train(self, rank: int):
+        # Initialize wandb only on rank 0 if project is specified
+        if rank == 0 and self.use_wandb:
+            wandb.init(project=self.config.wandb_project)
+            self.wandb_initialized = True
+            
+        try:
+            super()._train(rank)
+        finally:
+            if rank == 0 and self.wandb_initialized:
+                wandb.finish()
 
     def _eval_model(self):
         self.model.eval()
@@ -419,10 +471,12 @@ class NanoGPTTrainer(DilocoSimulator):
                 loss = self.model(batch)
                 total_loss += loss.item()
 
-                if self.rank == 0:
-                    wandb.log(
-                        {"eval_loss": loss.item(), "eval_perplexity": torch.exp(torch.tensor(loss.item())).item()}
-                    )
+                # Only log if wandb is initialized
+                if rank == 0 and self.wandb_initialized:
+                    wandb.log({
+                        "eval_loss": loss.item(),
+                        "eval_perplexity": torch.exp(torch.tensor(loss.item())).item()
+                    })
 
         avg_loss = total_loss / self.config.eval_iters
         if self.rank == 0:
@@ -439,39 +493,16 @@ class NanoGPTTrainer(DilocoSimulator):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
 
-        if self.rank == 0:
-            wandb.log(
-                {
-                    "train_loss": loss.item(),
-                    "train_perplexity": torch.exp(torch.tensor(loss.item())).item(),
-                    "learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "step": self.local_step,
-                }
-            )
-
-    def _train(self, rank: int):
-        if rank == 0:
-            wandb.init(project="nanogpt-diloco")
-        try:
-            super()._train(rank)
-        finally:
-            if rank == 0:
-                wandb.finish()
-
-
-class GPTTrainDataset(torch.utils.data.Dataset):
-    """Simple dataset wrapper for training data"""
-
-    def __init__(self, data, block_size):
-        self.data = data
-        self.block_size = block_size
-
-    def __len__(self):
-        return len(self.data) - self.block_size
-
-    def __getitem__(self, idx):
-        x = self.data[idx : idx + self.block_size]
-        return x, x
+        # Only log if wandb is initialized
+        if self.rank == 0 and self.wandb_initialized:
+            wandb.log({
+                "train_loss": loss.item(),
+                "train_perplexity": torch.exp(torch.tensor(loss.item())).item(),
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "step": self.local_step,
+            })
+            
+        return loss
 
 
 def get_dataset(args):
@@ -552,6 +583,7 @@ def main():
     parser.add_argument("--beta2", type=float, default=0.95)
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--wandb_project", type=str, default=None, help="WandB project name (optional)")
     args = parser.parse_args()
 
     # Set random seed
@@ -596,6 +628,7 @@ def main():
         ckpt_interval=1000,
         num_nodes=args.num_nodes,
         diloco_interval=1000,
+        wandb_project=args.wandb_project
     )
 
     # Create checkpoint directory if it doesn't exist
