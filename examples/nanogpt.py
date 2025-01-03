@@ -23,6 +23,10 @@ from datasets import load_dataset
 import os
 import wandb
 
+import matplotlib.pyplot as plt
+import pandas as pd
+from typing import Dict, List
+
 
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
@@ -448,6 +452,8 @@ class NanoGPTTrainer(DilocoSimulator):
         super().__init__(config)
         self.wandb_initialized = False
         self.use_wandb = config.wandb_project is not None
+        self.metrics_logger = MetricsLogger(config.save_dir)  # Pass save_dir
+        print(f"Initialized NanoGPTTrainer with metrics directory in {config.save_dir}")
 
     def _train(self, rank: int):
         # Initialize wandb only on rank 0 if project is specified
@@ -493,14 +499,20 @@ class NanoGPTTrainer(DilocoSimulator):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
 
-        # Only log if wandb is initialized
-        if self.rank == 0 and self.wandb_initialized:
-            wandb.log({
+        if self.rank == 0:
+            if self.wandb_initialized:
+                wandb.log({
+                    "train_loss": loss.item(),
+                    "train_perplexity": torch.exp(torch.tensor(loss.item())).item(),
+                    "learning_rate": self.optimizer.param_groups[0]["lr"],
+                    "step": self.local_step,
+                })
+            metrics = {
                 "train_loss": loss.item(),
                 "train_perplexity": torch.exp(torch.tensor(loss.item())).item(),
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-                "step": self.local_step,
-            })
+                "learning_rate": self.optimizer.param_groups[0]["lr"]
+            }
+            self.metrics_logger.log_metrics(metrics, self.local_step, save_plots=True)
             
         return loss
 
@@ -566,6 +578,137 @@ def get_dataset(args):
     print(f"Train data size: {train_data.shape}, Val data size: {val_data.shape}")
     return train_data, val_data, tokenizer.vocab_size
 
+class MetricsLogger:
+    def __init__(self, save_dir: str = ""):
+        self.save_dir = save_dir
+        self.metrics: Dict[str, List[float]] = {
+            'train_loss': [],
+            'train_perplexity': [],
+            'learning_rate': [],
+            'step': []
+        }
+        
+        self.metrics_dir = os.path.join(save_dir, 'metrics')
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        print(f"Created metrics directory at {self.metrics_dir}")
+
+    def log_metrics(self, metrics_dict: Dict[str, float], step: int, save_plots: bool = False):
+        """Log metrics and optionally save plots and CSV"""
+        # Only append step once per logging call
+        if step not in self.metrics['step']:
+            self.metrics['step'].append(step)
+            
+        # For each metric in our storage
+        for key in self.metrics:
+            if key != 'step':
+                # If this metric is in the current metrics_dict, use its value
+                if key in metrics_dict:
+                    self.metrics[key].append(metrics_dict[key])
+                # If this metric isn't in current metrics_dict, use previous value if exists
+                else:
+                    prev_value = self.metrics[key][-1] if self.metrics[key] else None
+                    self.metrics[key].append(prev_value)
+        
+        if save_plots:
+            try:
+                self.save_metrics()
+                self.plot_metrics()
+            except Exception as e:
+                print(f"Error saving metrics or plotting: {str(e)}")
+
+    def save_metrics(self):
+        """Save training metrics to CSV"""
+        try:
+            # Save training metrics only
+            train_df = pd.DataFrame({
+                'step': self.metrics['step'],
+                'train_loss': self.metrics['train_loss'],
+                'train_perplexity': self.metrics['train_perplexity'],
+                'learning_rate': self.metrics['learning_rate']
+            }).dropna(how='all', subset=['train_loss', 'train_perplexity', 'learning_rate'])
+            
+            train_path = os.path.join(self.metrics_dir, 'training_metrics.csv')
+            train_df.to_csv(train_path, index=False)
+
+        except Exception as e:
+            print(f"Error saving metrics to CSV: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def plot_metrics(self):
+        """Plot training metrics and save individual plots"""
+        try:
+            def safe_plot(x_data, y_data, label=None):
+                # Find valid pairs of x,y values (where y is not None)
+                valid_pairs = [(x, y) for x, y in zip(x_data, y_data) if y is not None]
+                if valid_pairs:
+                    x, y = zip(*valid_pairs)
+                    return x, y
+                return None, None
+
+            # Plot Train Loss
+            plt.figure(figsize=(10, 6))
+            x, y = safe_plot(self.metrics['step'], self.metrics['train_loss'])
+            if x: 
+                plt.plot(x, y, label='Train Loss', color='blue')
+                plt.xlabel('Step')
+                plt.ylabel('Loss')
+                plt.title('Training Loss')
+                plt.grid(True)
+                plt.savefig(os.path.join(self.metrics_dir, 'train_loss.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Plot Training Perplexity
+            plt.figure(figsize=(10, 6))
+            x, y = safe_plot(self.metrics['step'], self.metrics['train_perplexity'])
+            if x:
+                plt.plot(x, y, label='Train Perplexity', color='blue')
+                plt.xlabel('Step')
+                plt.ylabel('Perplexity')
+                plt.title('Training Perplexity')
+                plt.grid(True)
+                plt.savefig(os.path.join(self.metrics_dir, 'perplexity.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Plot Learning Rate
+            plt.figure(figsize=(10, 6))
+            x, y = safe_plot(self.metrics['step'], self.metrics['learning_rate'])
+            if x: 
+                plt.plot(x, y)
+                plt.xlabel('Step')
+                plt.ylabel('Learning Rate')
+                plt.title('Learning Rate Schedule')
+                plt.grid(True)
+                plt.savefig(os.path.join(self.metrics_dir, 'learning_rate.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Combined plot
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+            # Train Loss plot
+            x, y = safe_plot(self.metrics['step'], self.metrics['train_loss'])
+            if x: ax1.plot(x, y, color='blue')
+            ax1.set_xlabel('Step')
+            ax1.set_ylabel('Loss')
+            ax1.set_title('Training Loss')
+            ax1.grid(True)
+
+            # Learning rate plot
+            x, y = safe_plot(self.metrics['step'], self.metrics['learning_rate'])
+            if x: ax2.plot(x, y)
+            ax2.set_xlabel('Step')
+            ax2.set_ylabel('Learning Rate')
+            ax2.set_title('Learning Rate Schedule')
+            ax2.grid(True)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.metrics_dir, 'combined_metrics.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            print(f"Error creating plots: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def main():
     # Command line arguments
@@ -584,6 +727,12 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--wandb_project", type=str, default=None, help="WandB project name (optional)")
+    parser.add_argument("--eval_iters", type=int, default=500, 
+                       help="Number of iterations to use for evaluation")
+    parser.add_argument("--ckpt_interval", type=int, default=10000,
+                       help="Number of iterations between checkpoints")
+    parser.add_argument("--diloco_interval", type=int, default=500,
+                       help="Number of iterations between Diloco synchronizations")
     args = parser.parse_args()
 
     # Set random seed
@@ -624,10 +773,10 @@ def main():
         batch_size=args.batch_size,
         num_epochs=args.epochs,
         save_dir=args.checkpoint_dir,
-        eval_iters=200,
-        ckpt_interval=1000,
+        eval_iters=args.eval_iters,
+        ckpt_interval=args.ckpt_interval,
         num_nodes=args.num_nodes,
-        diloco_interval=1000,
+        diloco_interval=args.diloco_interval,
         wandb_project=args.wandb_project
     )
 
